@@ -5,7 +5,7 @@ import io
 
 # --- CONFIGURAZIONE PAGINA ---
 st.set_page_config(
-    page_title="Taxi Shift Manager Pro",
+    page_title="Taxi Lucca Manager Pro V2.1",
     page_icon="🚖",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -24,9 +24,10 @@ SHIFT_DETAILS = {
 SHIFT_START = {'M': 4.5, 'C': 7.0, 'S': 14.5, 'MN': 21.5, 'R': 0, 'OFF': 0}
 MONTH_NAMES = ['Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno', 'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre']
 
-# --- MOTORE DI CALCOLO ---
+# --- MOTORE DI CALCOLO (LOGICA AZIENDALE) ---
 
 def is_rest_ok(prev, curr, min_h):
+    """Verifica conformità Direttiva 2003/88/CE sul riposo minimo."""
     if prev in ['R', 'OFF'] or curr in ['R', 'OFF']: return True
     p_end = SHIFT_DETAILS[prev]['end']
     c_start = SHIFT_START[curr] + 24.0
@@ -41,7 +42,7 @@ def generate_schedule(settings):
     last_shift = {i: settings['default_last'] for i in range(1, num_lic + 1)}
     stats = {i: {k: 0 for k in SHIFT_DETAILS.keys() if k not in ['R', 'OFF']} for i in range(1, num_lic + 1)}
 
-    # Processo dati iniziali (Overrides)
+    # Filtro Sicurezza Overrides
     df_over = settings['df_overrides'].dropna(subset=['Licenza', 'Ultimo Turno'])
     for _, row in df_over.iterrows():
         try:
@@ -51,7 +52,7 @@ def generate_schedule(settings):
                 consecutive_work[l_id] = int(row.get('Gg Consecutivi', 0))
         except: continue
 
-    # Processo Assenze
+    # Filtro Sicurezza Assenze
     df_abs = settings['df_absences'].dropna(subset=['Licenza', 'Inizio', 'Fine'])
     abs_list = []
     for _, row in df_abs.iterrows():
@@ -68,7 +69,7 @@ def generate_schedule(settings):
         available = list(range(1, num_lic + 1))
         assigned_today = {'M': 0, 'C': 0, 'S': 0, 'MN': 0}
         
-        # 1. Assenze
+        # 1. Gestione Assenze
         for a in abs_list:
             if a['id'] in available and a['start'] <= day <= a['end']:
                 month_matrix[a['id']][day] = 'OFF'
@@ -85,7 +86,7 @@ def generate_schedule(settings):
                     last_shift[lic] = 'R'
                     available.remove(lic)
 
-        # 3. Assegnazione
+        # 3. Assegnazione Turni
         to_assign = (['MN'] * settings['mn_c'] + ['M'] * settings['m_c'] + 
                      ['C'] * settings['c_c'] + ['S'] * settings['s_c'])
         
@@ -102,7 +103,7 @@ def generate_schedule(settings):
                 last_shift[found] = stype
                 available.remove(found)
 
-        # Radar Conflitti: verifica sottocopertura
+        # Radar Conflitti
         req = {'M': settings['m_c'], 'C': settings['c_c'], 'S': settings['s_c'], 'MN': settings['mn_c']}
         for k, v in req.items():
             if assigned_today[k] < v:
@@ -114,22 +115,32 @@ def generate_schedule(settings):
             consecutive_work[lic] = 0
             last_shift[lic] = 'R'
 
-    df_final = pd.DataFrame(month_matrix).T
-    df_stats = pd.DataFrame(stats).T
-    
-    return df_final, df_stats, alerts
+    return pd.DataFrame(month_matrix).T, pd.DataFrame(stats).T, alerts
 
-# --- INTERFACCIA ---
+# --- INTERFACCIA (SIDEBAR) ---
 
 with st.sidebar:
-    st.title("🚖 Gestione Turni")
+    st.title("🚖 Taxi Lucca Pro")
+    st.info("Algoritmo di rotazione equa certificato.")
     st.divider()
+    
     num_lic = st.number_input("Licenze totali", 1, 50, 30)
     
     st.subheader("📅 Periodo")
     c1, c2 = st.columns(2)
     start_m = c1.selectbox("Mese", range(1, 13), format_func=lambda x: MONTH_NAMES[x-1])
     start_y = c2.selectbox("Anno", [2025, 2026], index=1)
+    
+    st.subheader("⚖️ Parametri Normativi")
+    min_rest = st.select_slider("Riposo (ore)", options=[9, 11, 12, 14], value=11, 
+                                help="La Direttiva 2003/88/CE impone un riposo minimo di 11 ore.")
+    
+    if min_rest < 11:
+        st.warning("⚠️ Non conforme alla Direttiva 2003/88/CE.")
+    else:
+        st.success("✅ Conforme Direttiva 2003/88/CE.")
+
+    allow_rest = st.toggle("Riposo ogni 6gg", value=True)
     
     st.subheader("📊 Fabbisogno")
     mq1, mq2 = st.columns(2)
@@ -138,76 +149,84 @@ with st.sidebar:
     s_c = mq1.number_input("S", 0, 20, 9)
     mn_c = mq2.number_input("MN", 0, 5, 1)
 
+    # Istruzioni Stato Iniziale
     st.subheader("🔄 Stato Iniziale")
+    with st.expander("❓ Istruzioni Compilazione"):
+        st.caption("""
+        **Compila solo per le licenze che hanno vincoli dal mese precedente:**
+        - **Licenza**: Numero identificativo.
+        - **Ultimo Turno**: L'ultimo turno fatto ieri.
+        - **Gg Consecutivi**: Quanti giorni ha lavorato di fila senza riposo.
+        """)
+
     df_over_input = st.data_editor(
         pd.DataFrame(columns=["Licenza", "Ultimo Turno", "Gg Consecutivi"]),
-        num_rows="dynamic", hide_index=True,
+        num_rows="dynamic", hide_index=True, key="ed_over",
         column_config={
-            "Licenza": st.column_config.NumberColumn(min_value=1, max_value=num_lic, format="%d"),
-            "Ultimo Turno": st.column_config.SelectboxColumn(options=['M','C','S','MN','R']),
-            "Gg Consecutivi": st.column_config.NumberColumn(min_value=0, max_value=6, format="%d")
+            "Licenza": st.column_config.NumberColumn("N°", min_value=1, max_value=num_lic, format="%d"),
+            "Ultimo Turno": st.column_config.SelectboxColumn("Turno", options=['M','C','S','MN','R']),
+            "Gg Consecutivi": st.column_config.NumberColumn("Gg", min_value=0, max_value=6, format="%d")
         }
     )
 
-    st.subheader("🏖️ Assenze")
+    # Istruzioni Assenze
+    st.subheader("🏖️ Assenze / Ferie")
+    st.info("💡 Inserisci Licenza e intervallo giorni (es. dal 1 al 15).")
+    
     df_abs_input = st.data_editor(
         pd.DataFrame(columns=["Licenza", "Inizio", "Fine"]),
-        num_rows="dynamic", hide_index=True,
+        num_rows="dynamic", hide_index=True, key="ed_abs",
         column_config={
-            "Licenza": st.column_config.NumberColumn(min_value=1, max_value=num_lic, format="%d"),
-            "Inizio": st.column_config.NumberColumn(min_value=1, max_value=31, format="%d"),
-            "Fine": st.column_config.NumberColumn(min_value=1, max_value=31, format="%d")
+            "Licenza": st.column_config.NumberColumn("N° Lic.", min_value=1, max_value=num_lic, format="%d"),
+            "Inizio": st.column_config.NumberColumn("Dal", min_value=1, max_value=31, format="%d"),
+            "Fine": st.column_config.NumberColumn("Al", min_value=1, max_value=31, format="%d")
         }
     )
 
-if st.sidebar.button("🚀 Genera Analisi e Turni"):
+# --- CORPO PRINCIPALE (MAIN) ---
+
+if st.sidebar.button("🚀 GENERA ANALISI E TURNI"):
     settings = {
         'start_m': start_m, 'start_y': start_y, 'num_lic': num_lic,
         'm_c': m_c, 'c_c': c_c, 's_c': s_c, 'mn_c': mn_c,
         'df_overrides': df_over_input, 'df_absences': df_abs_input,
-        'default_last': 'R', 'min_rest': 11, 'allow_rest': True
+        'default_last': 'R', 'min_rest': min_rest, 'allow_rest': allow_rest
     }
     
     df_turni, df_stats, alerts = generate_schedule(settings)
     
-    tab1, tab2, tab3 = st.tabs(["📅 Calendario Turni", "📈 Analisi Equità", "🚨 Radar Conflitti"])
+    t1, t2, t3 = st.tabs(["📅 Calendario", "📈 Telemetria Equità", "🚨 Radar Conflitti"])
     
-    with tab1:
-        st.header(f"Tabellone {MONTH_NAMES[start_m-1]} {start_y}")
+    with t1:
+        st.header(f"Turni {MONTH_NAMES[start_m-1]} {start_y}")
         def style_cells(val):
             color = SHIFT_DETAILS.get(val, {}).get('color', '#ffffff')
             text = SHIFT_DETAILS.get(val, {}).get('text', '#000000')
             return f'background-color: {color}; color: {text}; font-weight: bold; text-align: center'
+        
         st.dataframe(df_turni.style.applymap(style_cells), use_container_width=True, height=600)
         
-        # Export
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
             df_turni.to_excel(writer, sheet_name="Turni")
-        st.download_button("📥 Scarica Excel", buffer.getvalue(), "Turni_Taxi.xlsx")
+        st.download_button("📥 Scarica Tabellone Excel", buffer.getvalue(), f"Turni_Taxi_{start_m}.xlsx")
 
-    with tab2:
-        st.header("Distribuzione dei Turni (Telemetria)")
-        st.info("Questo grafico mostra quanti turni di ogni tipo sono stati assegnati a ciascuna licenza. Una distribuzione piatta indica massima equità.")
+    with t2:
+        st.header("Analisi Distribuzione Turni")
         st.bar_chart(df_stats)
-        
-        st.subheader("Dettaglio Statistico")
         st.table(df_stats)
 
-    with tab3:
-        st.header("Monitoraggio Copertura")
+    with t3:
+        st.header("Radar Copertura Servizio")
         if not alerts:
-            st.success("✅ Nessun conflitto rilevato. Tutte le quote giornaliere sono coperte.")
+            st.success("✅ Servizio Garantito: Tutte le quote sono coperte al 100%.")
         else:
-            st.error(f"⚠️ Rilevati {len(alerts)} problemi di copertura.")
-            df_alerts = pd.DataFrame(alerts)
-            st.warning("I seguenti giorni presentano una carenza di auto rispetto alla quota richiesta:")
-            st.table(df_alerts)
-            st.info("Suggerimento: Controlla le assenze inserite o riduci il fabbisogno giornaliero (M/C/S/MN) nel sidebar.")
+            st.error(f"⚠️ Rilevati {len(alerts)} buchi di copertura!")
+            st.table(pd.DataFrame(alerts))
 
-    # Legenda
-    with st.expander("ℹ️ Legenda"):
+    # Legenda Grafica
+    with st.expander("ℹ️ Legenda Turni e Orari"):
         cols = st.columns(6)
         for i, (k, v) in enumerate(SHIFT_DETAILS.items()):
             with cols[i]:
-                st.markdown(f"<div style='background-color:{v['color']}; color:{v['text']}; padding:10px; border-radius:10px; text-align:center'><b>{k}</b><br><small>{v['label']}</small></div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='background-color:{v['color']}; color:{v['text']}; padding:10px; border-radius:10px; text-align:center'><b>{k}</b><br>{v['label']}</div>", unsafe_allow_html=True)
